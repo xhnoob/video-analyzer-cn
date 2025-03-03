@@ -2,6 +2,8 @@ from setuptools import setup, find_packages
 import os
 from pathlib import Path
 
+VERSION = "0.1.0"
+
 with open("readme.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
@@ -10,7 +12,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="video-analyzer",
-    version="0.1.0",
+    version=VERSION,
     author="Jesse White",
     description="A tool for analyzing videos using Vision models",
     long_description=long_description,

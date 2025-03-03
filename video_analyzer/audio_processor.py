@@ -3,10 +3,10 @@ from pathlib import Path
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass
 import subprocess
-import torch
+import speech_recognition as sr
 from pydub import AudioSegment
 
-# Set up logging
+# 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -19,139 +19,100 @@ class AudioTranscript:
 class AudioProcessor:
     def __init__(self, 
                  language: str | None = None,
-                 model_size_or_path: str = "medium",
-                 device: str = "cpu"):
-        """Initialize audio processor with specified Whisper model size or model path. By default, the medium model is used."""
+                 model_size_or_path: str = "medium",  # 保留此参数以保持兼容性
+                 device: str = "cpu"):  # 保留此参数以保持兼容性
+        """使用 SpeechRecognition 初始化音频处理器。"""
         try:
-            from faster_whisper import WhisperModel
+            self.recognizer = sr.Recognizer()
+            self.language = language if language else "en-US"  # 如果未指定语言，默认使用英语
             
-            # Log cache directory
-            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
-            logger.debug(f"Using HuggingFace cache directory: {cache_dir}")
-            
-            # Force CPU usage for now faster whisper having issues with cudas
-            self.device = device
-            compute_type = "float32"
-            logger.debug(f"Using device: {self.device}")
-
-            self.language = language if language else None
-
-            self.model = WhisperModel(
-                model_size_or_path,
-                device=device,
-                compute_type=compute_type
-            )
-            logger.info(f"Initiation Input: Model size or path: {model_size_or_path}, Device: {device}, Compute type: {compute_type}, Language: {self.language if self.language else 'auto detected'}")
-            logger.debug(f"Successfully loaded Whisper model: {model_size_or_path}")
-            
-            # Check for ffmpeg installation
+            # 检查是否安装了 ffmpeg
             try:
                 subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
                 self.has_ffmpeg = True
             except (subprocess.CalledProcessError, FileNotFoundError):
                 self.has_ffmpeg = False
-                logger.warning("FFmpeg not found. Please install ffmpeg for better audio extraction.")
+                logger.warning("未找到 FFmpeg。请安装 ffmpeg 以获得更好的音频提取效果。")
                 
         except Exception as e:
-            logger.error(f"Error loading Whisper model: {e}")
+            logger.error(f"初始化语音识别时出错：{e}")
             raise
 
     def extract_audio(self, video_path: Path, output_dir: Path) -> Optional[Path]:
-        """Extract audio from video file and convert to format suitable for Whisper.
-        Returns None if video has no audio streams."""
+        """从视频文件中提取音频并转换为 WAV 格式。"""
         audio_path = output_dir / "audio.wav"
         output_dir.mkdir(parents=True, exist_ok=True)
         
         try:
-            # Extract audio using ffmpeg
+            # 使用 ffmpeg 提取音频
             subprocess.run([
                 "ffmpeg", "-i", str(video_path),
-                "-vn",  # No video
-                "-acodec", "pcm_s16le",  # PCM 16-bit little-endian
-                "-ar", "16000",  # 16kHz sampling rate
-                "-ac", "1",  # Mono
-                "-y",  # Overwrite output
+                "-vn",  # 不包含视频
+                "-acodec", "pcm_s16le",  # PCM 16位小端格式
+                "-ar", "16000",  # 16kHz 采样率
+                "-ac", "1",  # 单声道
+                "-y",  # 覆盖输出文件
                 str(audio_path)
             ], check=True, capture_output=True)
             
-            logger.debug("Successfully extracted audio using ffmpeg")
+            logger.debug("使用 ffmpeg 成功提取音频")
             return audio_path
         except subprocess.CalledProcessError as e:
             error_output = e.stderr.decode()
-            logger.error(f"FFmpeg error: {error_output}")
+            logger.error(f"FFmpeg 错误：{error_output}")
             
-            # Check if error indicates no audio streams
+            # 检查错误是否表明没有音频流
             if "Output file does not contain any stream" in error_output:
-                logger.debug("No audio streams found in video - skipping audio extraction")
+                logger.debug("视频中未找到音频流 - 跳过音频提取")
                 return None
                 
-            # If error is not about missing audio, try pydub as fallback
-            logger.info("Falling back to pydub for audio extraction...")
+            # 如果错误不是关于缺少音频，尝试使用 pydub 作为备选方案
+            logger.info("转而使用 pydub 提取音频...")
             try:
                 video = AudioSegment.from_file(str(video_path))
                 audio = video.set_channels(1).set_frame_rate(16000)
                 audio.export(str(audio_path), format="wav")
-                logger.debug("Successfully extracted audio using pydub")
+                logger.debug("使用 pydub 成功提取音频")
                 return audio_path
             except Exception as e2:
-                logger.error(f"Error extracting audio using pydub: {e2}")
-                # If both methods fail, raise error
+                logger.error(f"使用 pydub 提取音频时出错：{e2}")
                 raise RuntimeError(
-                    "Failed to extract audio. Please install ffmpeg using:\n"
+                    "提取音频失败。请使用以下命令安装 ffmpeg：\n"
                     "Ubuntu/Debian: sudo apt-get update && sudo apt-get install -y ffmpeg\n"
                     "MacOS: brew install ffmpeg\n"
                     "Windows: choco install ffmpeg"
                 )
 
     def transcribe(self, audio_path: Path) -> Optional[AudioTranscript]:
-        """Transcribe audio file using Whisper with quality checks."""
-        accepted_languages = {
-                "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da", "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he", "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la", "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi", "yi", "yo", "zh", "yue"
-        }
-        if self.language and self.language not in accepted_languages:
-            logger.warning(f"Invalid language code: {self.language}, will detect language automatically")
+        """使用 SpeechRecognition 转录音频文件。"""
         try:
-            # Initial transcription with VAD filtering
-            segments, info = self.model.transcribe(
-                str(audio_path),
-                beam_size=5,
-                word_timestamps=True,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500),
-                language = self.language if self.language in accepted_languages else None
-            )
+            with sr.AudioFile(str(audio_path)) as source:
+                audio = self.recognizer.record(source)
+                
+            # 尝试识别语音
+            text = self.recognizer.recognize_google(audio, language=self.language)
             
-            segments_list = list(segments)
-            if not segments_list:
-                logger.warning("No speech detected in audio")
-                return None
-            
-            # Convert segments to the expected format
-            segment_data = [
-                {
-                    "text": segment.text,
-                    "start": segment.start,
-                    "end": segment.end,
-                    "words": [
-                        {
-                            "word": word.word,
-                            "start": word.start,
-                            "end": word.end,
-                            "probability": word.probability
-                        }
-                        for word in (segment.words or [])
-                    ]
-                }
-                for segment in segments_list
-            ]
+            # 创建一个简单的片段，因为 SpeechRecognition 不提供详细的时间信息
+            segment_data = [{
+                "text": text,
+                "start": 0.0,
+                "end": None,  # 我们没有时间信息
+                "words": []  # 我们没有词级别的信息
+            }]
             
             return AudioTranscript(
-                text=" ".join(segment.text for segment in segments_list),
+                text=text,
                 segments=segment_data,
-                language=info.language
+                language=self.language
             )
             
+        except sr.UnknownValueError:
+            logger.warning("语音识别无法理解音频内容")
+            return None
+        except sr.RequestError as e:
+            logger.error(f"无法从语音识别服务获取结果：{e}")
+            return None
         except Exception as e:
-            logger.error(f"Error transcribing audio: {e}")
+            logger.error(f"转录音频时出错：{e}")
             logger.exception(e)
             return None
